@@ -53,6 +53,8 @@ from tqdm import tqdm
 from shapely.geometry import Polygon
 from typing import Dict, List, Optional, Tuple, Union
 from brails.utils import GeoTools
+import numpy as np
+import json
 
 
 REQUESTS_RETRY_STRATEGY = Retry(
@@ -483,6 +485,44 @@ class ArcgisAPIServiceHelper:
 
         return rectangles
 
+    def get_element_counts_polygon(self, bpoly: Polygon) -> int:
+        """
+        Get the count of elements within the bounding box of the given polygon.
+
+        Args:
+            bpoly (Polygon):
+                The polygon marking the boundaries of a region.
+
+        Returns:
+            int:
+                The count of elements within the bounding box, or 0 if an
+                error occurs.
+        """
+        geometry = {
+            "rings": [
+                np.array(bpoly.exterior.coords).tolist()
+            ]
+        }
+
+        # Set API parameters required to get the element counts:
+        params = {
+            'where': '1=1',  # No filter, get all elements
+            'outFields': '*',  # Get all fields
+            'geometry': json.dumps(geometry),
+            'geometryType': 'esriGeometryPolygon',
+            'inSR': '4326',
+            'spatialRel': 'esriSpatialRelIntersects',
+            'returnCountOnly': 'true',
+            'f': 'json',
+        }
+
+        # Set up a session with retry logic and query the API:
+        response = self._make_request_with_retry(self.api_endpoint_url, params)
+
+        # Return the count from the API response. If the response does not
+        # include the 'count' key, count defaults to 0:
+        return response.json().get('count', 0)
+    
     def get_element_counts(self, bpoly: Polygon) -> int:
         """
         Get the count of elements within the bounding box of the given polygon.

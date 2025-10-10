@@ -50,8 +50,9 @@ This module defines a class for scraping data from NSI.
 import requests
 from requests.adapters import HTTPAdapter, Retry
 import json
-from shapely.geometry import Point
+from shapely.geometry import Point, Polygon
 import logging
+import numpy as np
 
 from brails.utils import GeoTools
 from brails.types.asset_inventory import Asset, AssetInventory
@@ -64,6 +65,7 @@ logger = logging.getLogger(__name__)
 # Define global variables:
 API_ENDPOINT = "https://nsi.sec.usace.army.mil/nsiapi/structures?bbox="
 ASSET_TYPE = 'building'
+POST_ENDPOINT = "https://nsi.sec.usace.army.mil/nsiapi/structures?fmt=fc"
 
 
 class NSI_Parser:
@@ -465,6 +467,58 @@ class NSI_Parser:
 
         return inventory
 
+    def get_raw_data_polygon(self, region: RegionBoundary) -> AssetInventory:
+        """
+        Retrieve raw NSI data for a specified region.
+
+        Args:
+            region (RegionBoundary):
+                The region boundary object defining the area of interest.
+
+        Returns:
+            AssetInventory:
+                An `AssetInventory` object containing assets (buildings) within
+                the given region, extracted from the NSI data.
+                The region boundary object defining the area of interest.
+
+        Returns:
+            AssetInventory:
+                An `AssetInventory` object containing assets (buildings) within
+                the given region, extracted from the NSI data.
+
+        Notes:
+            The function retrieves NSI data within the bounding box of the
+            provided region boundary, filters out points outside the boundary,
+            and returns the resulting data in an `AssetInventory`.
+
+            The length unit for the data is assumed to be in meters ('m') or
+            feet ('ft') as specified in the class initialization, but the
+            function currently does not modify the length unit in this method.
+
+        Example:
+            region = RegionBoundary(...)
+            inventory = get_raw_data(region)
+        """
+        bpoly, _, _ = region.get_boundary()
+
+        # # Get NBI data for the computed bounding box:
+        datadict = self._get_nsi_data_from_polygon(bpoly)
+
+        # Display the number of NSI points that are within roi:
+        print(f'\nFound a total of {len(datadict)} building points in'
+              ' NSI that are within the entered region of interest')
+
+        # Save the results in the inventory:
+        inventory = AssetInventory()
+        for geometry, features in datadict.items():
+            index = features['fd_id']
+            coordinates = [[geometry.x, geometry.y]]
+            features['type'] = ASSET_TYPE
+            asset = Asset(index, coordinates, features)
+            inventory.add_asset(index, asset)
+
+        return inventory
+
     def get_filtered_data_given_inventory(self,
                                           inventory: AssetInventory,
                                           length_unit: str = 'ft',
@@ -568,3 +622,58 @@ class NSI_Parser:
         except (KeyError, ValueError) as e:
             logging.error(f"Unexpected response structure: {e}")
             return {}
+        
+    @staticmethod
+    def _get_nsi_data_from_polygon(polygon: Polygon) -> dict:
+        """
+        Get the NSI data for a polygon.
+
+        Args:
+            polygon (Polygon): A Shapely Polygon object defining the area of
+                interest.
+        Returns:
+            dict: Dictionary containing extracted NBI data keyed using the
+                NBI point coordinates.
+        """
+        data = {
+            "type": "FeatureCollection",
+            "features": [{
+                "type": "Feature",
+                "geometry": {
+                    "type": "Polygon",
+                    "coordinates": [
+                        np.array(polygon.exterior.coords).tolist()
+                    ]
+                },
+                "properties": {}
+            }]
+        }
+        # Define a retry stratey for common error codes to use in downloading
+        # NBI data:
+        session = requests.Session()
+        retries = Retry(total=5,
+                        backoff_factor=0.1,
+                        status_forcelist=[500, 502, 503, 504])
+        session.mount('https://', HTTPAdapter(max_retries=retries))
+        # Download NBI data using the defined retry strategy, read downloaded
+        # GeoJSON data into a list:
+        logging.info('\nGetting National Structure Inventory (NSI) building '
+                     'data for the entered location...')
+        try:
+            # response = session.get(url, timeout=10)
+            response = session.post(
+                POST_ENDPOINT, json=data, timeout=10)
+            response.raise_for_status()  # Raise an HTTPError for bad responses
+            data = response.json().get('features', [])
+
+            # Convert GeoJSON features to a dictionary with (lon, lat) as keys
+            return {Point(feat['geometry']['coordinates']): feat['properties']
+                    for feat in data}
+
+        except requests.exceptions.RequestException as e:
+            logging.error(f"Request failed: {e}")
+            return {}
+        except (KeyError, ValueError) as e:
+            logging.error(f"Unexpected response structure: {e}")
+            return {}
+        
